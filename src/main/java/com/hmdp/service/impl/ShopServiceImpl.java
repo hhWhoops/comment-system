@@ -8,9 +8,12 @@ import com.hmdp.entity.Shop;
 import com.hmdp.mapper.ShopMapper;
 import com.hmdp.service.IShopService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.hmdp.utils.RedisConstants;
 import io.netty.util.internal.StringUtil;
+import lombok.val;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import javax.annotation.Resource;
@@ -32,67 +35,121 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
     @Override
     public Result queryById(Long id) {
+//        //缓存穿透
+//        Shop shop = queryWithPassthrough(id);
+
+        //互斥锁解决缓存击穿
         Shop shop = queryWithMutex(id);
-        if (shop == null){
+        if (shop == null) {
             return Result.fail("店铺不存在");
         }
+        //返回
         return Result.ok(shop);
     }
 
-    //解决缓存穿透和使用互斥锁解决缓存击穿
     public Shop queryWithMutex(Long id){
-        String key = "shop:"+id;
-
-        String shopJson = stringRedisTemplate.opsForValue().get(key);
-        if (StrUtil.isNotBlank(shopJson)){//判断是否为null，空字符串，对象
-            //redis中存在，直接返回
+        //1、从redis中查信息
+        String shopJson = stringRedisTemplate.opsForValue().get(RedisConstants.CACHE_SHOP_KEY + id);
+        //2、若存在 直接返回店铺信息。
+        // StrUtil.isNotBlank(str)这个函数只有在str有值是返回ture
+        if (StrUtil.isNotBlank(shopJson)) {
             return JSONUtil.toBean(shopJson, Shop.class);
         }
-
-        //如果redis中是空字符串
-        if (shopJson != null){
-            //不为null，那就是空字符串
+        //判断命中的是否是空值
+        if (shopJson != null) {
             return null;
         }
 
-        //为空
-        String lockKey = "lock:shop"+id;
-        Shop shop = null;
+        //3、实现缓存重建
+        //3.1 获取互斥锁
+        String lockKey = RedisConstants.LOCK_SHOP_KEY +id;
+        Shop shopDetail = null;
         try {
-            boolean lock = tryLock(lockKey);
-            if (!lock){
+            boolean isLock = tryLock(lockKey);
+            //4.2判断是否成功
+            if(!isLock) {
+                //4.3失败，则休眠并重试
                 Thread.sleep(50);
                 return queryWithMutex(id);
             }
-            shop = getById(id);
-            //模拟重建的延时
+            //4.4成功，根据id查询数据库
+            shopDetail = getById(id);
+            //模拟重建时的延迟
             Thread.sleep(200);
-            if (shop == null){
-                //解决穿透，缓存控制
-                stringRedisTemplate.opsForValue().set(key,"",10, TimeUnit.MICROSECONDS);
+            String shopDetailJson = JSONUtil.toJsonStr(shopDetail);
+            //4、若数据库中不存在，直接返回错误
+            if (shopDetail == null) {
+                //防止穿透！！！
+                //将空值写入redis
+                stringRedisTemplate.opsForValue().set(RedisConstants.CACHE_SHOP_KEY + id,"",RedisConstants.CACHE_NULL_TTL,TimeUnit.MINUTES);
                 return null;
             }
-            //存在，写入redis
-            stringRedisTemplate.opsForValue().set(key,JSONUtil.toJsonStr(shop),30,TimeUnit.MINUTES);
+            //5、若存在写入redis，返回商铺信息
+            stringRedisTemplate.opsForValue().set(RedisConstants.CACHE_SHOP_KEY + id , shopDetailJson,RedisConstants.CACHE_SHOP_TTL,TimeUnit.MINUTES);
         } catch (InterruptedException e) {
             throw new RuntimeException(e);
-        } finally {
+        }finally {
+            //6、释放互斥锁
             unLock(lockKey);
         }
-        return shop;
+
+
+        return shopDetail;
+
     }
 
 
-    //获取锁
+    public Shop queryWithPassthrough(Long id){
+        //1、从redis中查信息
+        String shopJson = stringRedisTemplate.opsForValue().get(RedisConstants.CACHE_SHOP_KEY + id);
+        //2、若存在 直接返回店铺信息。
+        // StrUtil.isNotBlank(str)这个函数只有在str有值是返回ture
+        if (StrUtil.isNotBlank(shopJson)) {
+            return JSONUtil.toBean(shopJson, Shop.class);
+        }
+        //判断命中的是否是空值
+        if (shopJson != null) {
+            return null;
+        }
+        //3、若不存在 根据id去数据库中查询
+        Shop shopDetail = getById(id);
+        String shopDetailJson = JSONUtil.toJsonStr(shopDetail);
+        //4、若数据库中不存在，直接返回错误
+        if (shopDetail == null) {
+            //防止穿透！！！
+            //将空值写入redis
+            stringRedisTemplate.opsForValue().set(RedisConstants.CACHE_SHOP_KEY + id,"",RedisConstants.CACHE_NULL_TTL,TimeUnit.MINUTES);
+            return null;
+        }
+        //5、若存在写入redis，返回商铺信息
+        stringRedisTemplate.opsForValue().set(RedisConstants.CACHE_SHOP_KEY + id , shopDetailJson,RedisConstants.CACHE_SHOP_TTL,TimeUnit.MINUTES);
+        return shopDetail;
 
-    public boolean tryLock(String key){
-        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", 10, TimeUnit.SECONDS);
+    }
+
+    private boolean tryLock(String key){
+        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", RedisConstants.LOCK_SHOP_TTL, TimeUnit.SECONDS);
         return BooleanUtil.isTrue(flag);
     }
 
-    //释放锁
-    public void unLock(String key){
+
+
+    private void unLock(String key){
         stringRedisTemplate.delete(key);
+    }
+
+    @Override
+    @Transactional
+    public Result update(Shop shop) {
+
+        if (StringUtils.isEmpty(shop.getId())) {
+            return Result.fail("店铺id不为空");
+        }
+        //1更新数据库
+        updateById(shop);
+        //2删除缓存
+        stringRedisTemplate.delete(RedisConstants.CACHE_SHOP_KEY + shop.getId());
+        return Result.ok();
     }
 }
 

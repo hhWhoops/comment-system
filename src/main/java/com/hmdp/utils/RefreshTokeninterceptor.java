@@ -24,7 +24,6 @@ public class RefreshTokeninterceptor implements HandlerInterceptor {
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
-        log.info("拦截到{}",request.getRequestURI());
 //        // 1、获取session
 //        HttpSession session = request.getSession();
         //1、获取请求头中的token
