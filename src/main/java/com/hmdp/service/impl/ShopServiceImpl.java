@@ -55,13 +55,13 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
 
         //redis方法类执行
 
-//        //穿透
-//        Shop shop = cacheClient.queryWithPassthrough(RedisConstants.CACHE_SHOP_KEY,id,Shop.class,this::getById,
-//                RedisConstants.LOCK_SHOP_TTL,TimeUnit.MINUTES);
+        //穿透
+        Shop shop = cacheClient.queryWithPassthrough(RedisConstants.CACHE_SHOP_KEY,id,Shop.class,this::getById,
+                RedisConstants.LOCK_SHOP_TTL,TimeUnit.MINUTES);
 
-        //击穿
-        Shop shop = cacheClient.queryWithLogicExpire(RedisConstants.CACHE_SHOP_KEY,id,Shop.class,this::getById,
-                20L, TimeUnit.MINUTES);
+//        //击穿
+//        Shop shop = cacheClient.queryWithLogicExpire(RedisConstants.CACHE_SHOP_KEY,id,Shop.class,this::getById,
+//                20L, TimeUnit.MINUTES);
 
 
         if (shop == null) {

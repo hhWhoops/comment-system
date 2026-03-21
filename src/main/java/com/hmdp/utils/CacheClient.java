@@ -100,7 +100,7 @@ public class CacheClient {
         if (tryLock(lockKey)) {
             //5.2判断是否获取锁成功
             //5.3成功，开启独立线程，实现缓存重建
-            CACHE_REBUID_EXECUTOR.execute(() -> {
+            CACHE_REBUID_EXECUTOR.submit(() -> {
                 try {
                     //重建缓存
                     //先查数据库
